@@ -219,7 +219,7 @@
   }
 
   const FIELDS = {
-    tracks: [['title', 'Título', 'text'], ['album_id', 'Álbum', 'album'], ['artistIds', 'Artistas', 'artists'], ['genre', 'Género', 'text'], ['year', 'Año', 'number'], ['credits', 'Créditos', 'area'], ['lyrics', 'Letra', 'area']],
+    tracks: [['title', 'Título', 'text'], ['audio', 'Reemplazar archivo de audio', 'audio'], ['album_id', 'Álbum', 'album'], ['artistIds', 'Artistas', 'artists'], ['genre', 'Género', 'text'], ['year', 'Año', 'number'], ['credits', 'Créditos', 'area'], ['lyrics', 'Letra', 'area']],
     albums: [['title', 'Título', 'text'], ['artistIds', 'Artistas', 'artists'], ['year', 'Año', 'number'], ['genre', 'Género', 'text'], ['description', 'Descripción', 'area'], ['credits', 'Créditos', 'area'], ['notes', 'Notas', 'area'], ['cover', 'Cambiar portada', 'file'], ['order', 'Orden de las canciones', 'order']],
     artists: [['name', 'Nombre', 'text'], ['bio', 'Biografía', 'area'], ['credits', 'Créditos', 'area'], ['image', 'Cambiar imagen', 'file']]
   };
@@ -236,6 +236,7 @@
       else if (type === 'artists') el = `<select name="${key}" multiple size="5">${opts(artists, nameOf, v || [])}</select>`;
       else if (type === 'area') el = `<textarea name="${key}" rows="${key === 'lyrics' ? 6 : 3}">${esc(v)}</textarea>`;
       else if (type === 'file') el = `<input type="file" name="${key}" accept="image/*">`;
+      else if (type === 'audio') el = `<input type="file" name="${key}" accept="audio/*,.flac,.opus,.m4a"><small class="sub">Opcional · máximo ${mb(MAX)} · deja el campo vacío para conservar el audio actual.</small>`;
       else if (type === 'order') return `<label>${label}</label><ul class="order" id="orderList"></ul>`;
       else el = `<input type="${type}" name="${key}" value="${esc(v)}"${key === 'title' || key === 'name' ? ' required' : ''}>`;
       return `<label>${label}</label>${el}`;
@@ -250,12 +251,27 @@
   $('#fEdit').addEventListener('submit', async e => {
     e.preventDefault();
     const { k, row } = editing, fd = new FormData(e.target), data = { ...row.data }, p = {};
+    let replacedAudio = null;
     const btn = e.submitter; if (btn) btn.disabled = true;
     try {
       for (const [key, , type] of FIELDS[k]) {
         if (key === 'album_id') p.album_id = fd.get(key) || null;
         else if (key === 'artistIds') data.artistIds = fd.getAll(key).slice(0, 10);
         else if (type === 'order') data.trackIds = order;
+        else if (type === 'audio') {
+          const f = fd.get(key);
+          if (!(f && f.size)) continue;
+          const fileExt = ext(f);
+          if (!AUDIO_EXT.includes(fileExt) && !f.type.startsWith('audio/')) throw new Error('El archivo elegido no es un audio compatible.');
+          if (f.size > MAX) throw new Error(`El audio supera el límite de ${mb(MAX)}.`);
+          const oldPath = row.audio_path;
+          const newPath = `audio/${row.id}/replacement-${Date.now()}.${fileExt}`;
+          await upload(newPath, f);
+          p.audio_path = newPath;
+          replacedAudio = { oldPath, newPath };
+          const newDuration = await duration(f);
+          if (newDuration > 0) data.duration = newDuration;
+        }
         else if (type === 'file') {
           const f = fd.get(key); if (!(f && f.size)) continue;
           if (!f.type.startsWith('image/')) throw new Error('El archivo elegido no es una imagen.');
@@ -266,8 +282,13 @@
       if (k === 'tracks' && p.album_id !== row.album_id) {
         for (const a of albums) { const ids = a.data.trackIds || []; if (a.id === row.album_id && ids.includes(row.id)) await patch('albums', a.id, { ...a.data, trackIds: ids.filter(x => x !== row.id) }); if (a.id === p.album_id && !ids.includes(row.id)) await patch('albums', a.id, { ...a.data, trackIds: [...ids, row.id] }); }
       }
-      const { error } = await patch(k, row.id, data, p); if (error) throw error;
-      say('Cambios guardados.'); $('#dlg').close();
+      const { error } = await patch(k, row.id, data, p);
+      if (error) { if (replacedAudio) await sb.storage.from(C.bucket).remove([replacedAudio.newPath]); throw error; }
+      if (replacedAudio?.oldPath) {
+        const { error: removeError } = await sb.storage.from(C.bucket).remove([replacedAudio.oldPath]);
+        if (removeError) console.warn('El audio nuevo quedó guardado, pero no se pudo borrar el anterior:', removeError);
+      }
+      say(replacedAudio ? 'Audio reemplazado correctamente. Cambios guardados.' : 'Cambios guardados.'); $('#dlg').close();
     } catch (err) { say(`Error: ${err.message || err}`, true); $('#dlg').close(); }
     await refresh(); view();
   });
